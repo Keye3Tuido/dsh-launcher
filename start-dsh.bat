@@ -8,6 +8,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Content -LiteralPat
 #  Behavior:
 #    - Starts "dsh web" and opens http://127.0.0.1:3080
 #    - Reopens the page within ~2s if the user closes it
+#    - Detects the dsh tab even when it sits in the background
+#      (Chrome/Edge etc.), so switching tabs never opens a duplicate
 #    - Stop with Ctrl+C or by closing this console window
 # ============================================================
 $ErrorActionPreference = "Continue"
@@ -56,6 +58,23 @@ public static class WinEnum {
     }, IntPtr.Zero);
     return found;
   }
+
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  public static System.Collections.Generic.List<IntPtr> GetWindowsByProcess(string[] processNames) {
+    var list = new System.Collections.Generic.List<IntPtr>();
+    EnumWindows(delegate(IntPtr h, IntPtr l) {
+      if (!IsWindowVisible(h)) return true;
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      string pname = null;
+      try { pname = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; } catch { return true; }
+      if (pname == null) return true;
+      foreach (var n in processNames) {
+        if (string.Equals(pname, n, StringComparison.OrdinalIgnoreCase)) { list.Add(h); return true; }
+      }
+      return true;
+    }, IntPtr.Zero);
+    return list;
+  }
 }
 "@ -IgnoreWarnings -ErrorAction Stop
   $hasWinEnum = $true
@@ -64,6 +83,16 @@ public static class WinEnum {
 } finally {
   $env:LIB     = $savedLib
   $env:INCLUDE = $savedInclude
+}
+
+# ---------- Load UI Automation (reads every browser tab, incl. background) ----------
+$hasUia = $false
+try {
+  Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+  Add-Type -AssemblyName UIAutomationTypes  -ErrorAction Stop
+  $hasUia = $true
+} catch {
+  Write-Host "  (UI Automation unavailable, background-tab detection limited)" -ForegroundColor Yellow
 }
 
 function Test-PageWindow([string[]]$needles) {
@@ -82,6 +111,57 @@ function Test-PageWindow([string[]]$needles) {
     } catch {}
   }
   return $false
+}
+
+# ---------- Detect the dsh tab even when it is not the active tab ----------
+# Window titles only reflect the ACTIVE tab. To see background tabs we use
+# UI Automation: Chromium browsers (Edge/Chrome/Brave/Opera/Vivaldi) expose
+# every tab as a "TabItem" element whose Name is the page title, so the dsh
+# tab is found no matter which tab is active. (Reading browser session files
+# instead proved unreliable: stale files survive long after tabs are closed.)
+# Return values: $true = tab found, $false = confirmed absent, $null = unknown
+function Test-UiaBrowserTab([string[]]$needles) {
+  if (-not $hasWinEnum -or -not $hasUia) { return $null }
+  $chromium = @("msedge", "chrome", "brave", "opera", "vivaldi")
+  $hwnds = [WinEnum]::GetWindowsByProcess($chromium)
+  if (-not $hwnds -or $hwnds.Count -eq 0) {
+    # No Chromium window: a dsh tab cannot exist there. If the user may be
+    # browsing with something we cannot inspect (e.g. Firefox), say unknown.
+    if (Get-Process -Name "firefox" -ErrorAction SilentlyContinue) { return $null }
+    return $false
+  }
+  $inspected = $false
+  foreach ($h in $hwnds) {
+    try {
+      $root = [System.Windows.Automation.AutomationElement]::FromHandle($h)
+      if (-not $root) { continue }
+      $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::TabItem)
+      $tabs = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
+      $inspected = $true
+      for ($i = 0; $i -lt $tabs.Count; $i++) {
+        $name = $tabs.Item($i).Current.Name
+        if (-not $name) { continue }
+        $low = $name.ToLowerInvariant()
+        foreach ($n in $needles) {
+          if ($low.Contains($n.ToLowerInvariant())) { return $true }
+        }
+      }
+    } catch {
+      # Window vanished or its UIA tree is unavailable: treat as unknown.
+    }
+  }
+  if ($inspected) { return $false } else { return $null }
+}
+
+function Test-DshPageOpen {
+  # Three states:
+  #   $true  -> a dsh window/tab exists, do nothing
+  #   $false -> confirmed gone, safe to (re)open
+  #   $null  -> could not tell, be conservative and do NOT reopen
+  if (Test-PageWindow $needles) { return $true }
+  return Test-UiaBrowserTab $needles
 }
 
 # ---------- Environment check ----------
@@ -146,7 +226,7 @@ try {
     exit 1
   }
 
-  $needles = @("deepseek harness", "127.0.0.1")
+  $needles = @("deepseek harness")
 
   Write-Host ""
   Write-Host "[OK] dsh is running: $URL"
@@ -155,17 +235,28 @@ try {
   Write-Host ""
 
   $lastOpen = [DateTime]::MinValue
-  if (-not (Test-PageWindow $needles)) {
+  $pageState = Test-DshPageOpen
+  if ($pageState -eq $true) {
+    Write-Host "The dsh page is already open in your browser."
+  } else {
+    # $false = confirmed closed, $null = could not tell on first launch.
+    # Open once here, but the watchdog below only reopens on a confirmed
+    # "closed" state, so a background tab never triggers a duplicate window.
     Write-Host "Opening the web page..."
     Start-Process $URL
     $lastOpen = Get-Date
   }
 
   # ---------- Watchdog: reopen the page whenever it is closed ----------
+  # Only reopen when we are sure the page is gone (window title no longer
+  # matches AND the browser session files show no dsh tab). When the page
+  # merely sits in a background tab, Test-DshPageOpen returns $true and we
+  # leave it alone.
   while (-not $proc.HasExited) {
     Start-Sleep -Seconds $WatchInterval
     if (-not $proc.HasExited) {
-      if (-not (Test-PageWindow $needles) -and ((Get-Date) - $lastOpen).TotalSeconds -ge 5) {
+      $pageState = Test-DshPageOpen
+      if ($pageState -eq $false -and ((Get-Date) - $lastOpen).TotalSeconds -ge 5) {
         Write-Host "[$(Get-Date -Format HH:mm:ss)] Page was closed, reopening..."
         Start-Process $URL
         $lastOpen = Get-Date

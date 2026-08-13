@@ -1,0 +1,5 @@
+# Keep line endings platform-correct:
+# the macOS launcher MUST stay LF, the Windows .bat stays CRLF.
+* text=auto
+*.command text eol=lf
+*.bat text eol=crlf

@@ -1,49 +1,37 @@
-# DeepSeek Harness 一键启动器（macOS / Windows）
+# DeepSeek Harness 一键启动器
 
-双击对应文件即可一键启动 `dsh web`：
+双击启动 `dsh web`，无需命令行。
 
-| 平台 | 文件 | 说明 |
+| 平台 | 文件 | 用法 |
 |---|---|---|
-| macOS | `start-dsh.command` | 双击后自动在「终端」中运行 |
-| Windows | `start-dsh.bat` | 单文件：双击后在命令提示符中运行（内嵌 PowerShell 脚本，前 3 行为启动头） |
+| macOS | `start-dsh.command` | 双击运行 |
+| Windows | `start-dsh.bat` | 双击运行 |
 
-## 行为
+## macOS 快速开始
 
-1. 运行 `npx @deepseek-ai/dsh web`（与官方方式一致），首次运行会自动下载依赖，需联网；
-2. 启动成功后自动打开本地网页 `http://127.0.0.1:3080`；
-3. **网页被手动关闭后约 2 秒内会自动重新打开**；
-4. 只有以下方式才能停止（停止后网页不再自动重开）：
-   - 在终端中按 `Ctrl+C`；
-   - 直接关闭终端窗口。
+首次在终端执行一次（修复权限并启动）：
 
-## 环境要求
+```bash
+cd /path/to/dsh-launcher   # 输入 cd 加空格后，把 dsh-launcher 文件夹拖进终端自动填路径
+xattr -d com.apple.quarantine start-dsh.command 2>/dev/null
+chmod +x start-dsh.command && ./start-dsh.command
+```
 
-- **Node.js**（官方要求）：请到 <https://nodejs.org/> 安装（建议最新 LTS 版）。
-  未安装时脚本会提示并等待按键退出。
-- macOS：无需额外软件；优先使用 Chrome / Edge / Brave / Arc / Safari 之一展示网页
-  （按以上顺序自动选择已安装的浏览器）。
-- Windows：无需额外软件；自动使用系统默认浏览器，通过窗口标题监测网页是否被关闭。
+之后双击 `start-dsh.command` 即可。
+
+## 说明
+
+- 运行 `npx @deepseek-ai/dsh web`，首次需联网下载依赖；
+- 自动打开 `http://127.0.0.1:3080`，网页被关闭约 2 秒后自动重开；
+- 停止：终端中按 `Ctrl+C`，或直接关闭终端窗口；
+- 依赖 Node.js（<https://nodejs.org/>），未安装时脚本会提示。
 
 ## 常见问题
 
-**macOS 双击提示"无法打开"（Gatekeeper 拦截）**
-右键文件 →「打开」，或在终端执行：
-```bash
-xattr -d com.apple.quarantine start-dsh.command
-```
-注意：`xattr` 本身就是系统命令，直接执行即可，**不要**写成
-`bash xattr -d ...`（否则会报 `xattr: cannot execute binary file`）。
-
-**macOS 首次运行弹出自助授权提示**
-系统会询问是否允许「终端」控制浏览器 / System Events，请点「允许」，
-否则脚本无法检测网页是否被关闭。
-
-**想换端口 / 地址**
-用环境变量覆盖（需与 dsh 的实际启动参数一致，例如先加 `--port`）：
-- macOS：在脚本中把 `npx --yes @deepseek-ai/dsh web` 改为 `npx --yes @deepseek-ai/dsh web --port 8080`，并将顶部 `URL=` 改为 `http://127.0.0.1:8080`；
-- Windows：同样修改 `start-dsh.bat` 中的启动参数与 `$URL`（第 4 行起的 PowerShell 部分；前 3 行启动头请勿改动）。
-
-**网页关闭后没有自动重开？**
-- macOS：确认已授权「自动化」权限（系统设置 → 隐私与安全性 → 自动化）。
-- Windows：确认使用的是 Chrome / Edge / Firefox 等主流浏览器，且页面标题仍为
-  "DeepSeek Harness"。
+| 症状 | 解决 |
+|---|---|
+| macOS 双击提示"无法打开" | `xattr -d com.apple.quarantine start-dsh.command` |
+| macOS 双击提示"没有权限" | `chmod +x start-dsh.command` |
+| macOS 首次弹授权提示 | 点「允许」，否则无法检测网页是否被关闭 |
+| 网页关闭后不自动重开 | macOS：检查「系统设置 → 隐私与安全性 → 自动化」授权 |
+| 想换端口 | 改脚本中 `dsh web` 启动参数与顶部 `URL=` 为对应端口 |

@@ -31,6 +31,8 @@
 ```bash
 xattr -d com.apple.quarantine start-dsh.command
 ```
+注意：`xattr` 本身就是系统命令，直接执行即可，**不要**写成
+`bash xattr -d ...`（否则会报 `xattr: cannot execute binary file`）。
 
 **macOS 首次运行弹出自助授权提示**
 系统会询问是否允许「终端」控制浏览器 / System Events，请点「允许」，

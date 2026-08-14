@@ -170,13 +170,14 @@ function Test-UiaBrowserTab([string[]]$needles) {
 }
 
 # ---------- Primary detection: live TCP connection to the dsh server ----------
-# A loaded dsh page keeps a WebSocket (plus HTTP keep-alive) connection open to
-# the local server, and closing the tab tears those connections down within
-# ~2 seconds. Unlike window titles or UI Automation this signal does not care
-# whether the browser window is minimized or the tab sits in the background, so
-# it is the most reliable "is the page open" check on Windows.
-# Return values: $true = a browser holds a connection (page open),
-#                $false = no browser connection (page closed),
+# A loaded dsh page keeps a WebSocket open to the local server. This signal is
+# independent of window minimization and background tabs. Crucially, when a tab
+# navigates away (a bookmark replaces the page) the WebSocket tears down and its
+# socket enters CLOSE_WAIT/FIN_WAIT, even though the browser may keep idle
+# keep-alive sockets ESTABLISHED for a while; spotting those closing sockets is
+# what tells "open" apart from "navigated away".
+# Return values: $true = a browser holds a live connection (page open),
+#                $false = no live connection, or a socket is closing (closed),
 #                $null = probe unavailable, cannot tell.
 function Test-ServerConnection {
   $uri = $null
@@ -192,22 +193,31 @@ function Test-ServerConnection {
   try { $netstat = @(netstat -ano 2>$null) } catch { return $null }
   if (-not $netstat -or $netstat.Count -eq 0) { return $null }
 
-  $owners = @{}
+  $estOwners = @{}
+  $closing = 0
   foreach ($line in $netstat) {
-    # Client side of a connection to the page: TCP <local> <remote>:<port> ESTABLISHED <pid>
-    if ($line -match ('^\s*TCP\s+\S+:(\d+)\s+\S+:' + $port + '\s+ESTABLISHED\s+(\d+)')) {
-      $owners[[int]$Matches[2]] = $true
+    # Client side of a connection to the page: TCP <local> <remote>:<port> <state> <pid>
+    if ($line -match ('^\s*TCP\s+\S+:\d+\s+\S+:' + $port + '\s+(\S+)\s+(\d+)')) {
+      $state = $Matches[1]
+      $owner = [int]$Matches[2]
+      if ($state -eq 'ESTABLISHED') { $estOwners[$owner] = $true }
+      elseif ($state -match '^(CLOSE_WAIT|FIN_WAIT_1|FIN_WAIT_2|LAST_ACK)$') { $closing++ }
     }
   }
-  if ($owners.Count -eq 0) { return $false }   # no live connection to the page
 
-  foreach ($ownerId in $owners.Keys) {
+  # A socket in CLOSE_WAIT/FIN_WAIT means the page just navigated away or was
+  # closed (its WebSocket is tearing down). Report closed even if some idle
+  # keep-alive sockets are still ESTABLISHED.
+  if ($closing -gt 0) { return $false }
+
+  # Only live ESTABLISHED connections remain: open if any belongs to a browser.
+  foreach ($owner in $estOwners.Keys) {
     try {
-      $p = Get-Process -Id $ownerId -ErrorAction Stop
+      $p = Get-Process -Id $owner -ErrorAction Stop
       if ($browsers -contains $p.ProcessName) { return $true }
     } catch {}
   }
-  return $false   # connections exist, but none from a recognized browser
+  return $false   # connections exist but none from a recognized browser, or none at all
 }
 
 function Test-DshPageOpen {
@@ -216,13 +226,15 @@ function Test-DshPageOpen {
   #   $false -> confirmed gone, safe to (re)open
   #   $null  -> could not tell, be conservative and do NOT reopen
   #
-  # Primary: a live browser connection to the server (independent of window
-  # minimization / background tabs). Fall back to the window/tab checks only
-  # when the connection probe itself is unavailable ($null).
-  $conn = Test-ServerConnection
-  if ($conn -ne $null) { return $conn }
+  # UI Automation reads every tab title, so when the window is not minimized it
+  # tells "open" apart from "navigated away / closed" (the tab title changes).
+  # When UIA cannot read (minimized window) it returns $null; then the window
+  # title (still readable while minimized) is checked, and finally the live
+  # connection to the server is used as a last resort.
+  $ui = Test-UiaBrowserTab $needles
+  if ($ui -ne $null) { return $ui }
   if (Test-PageWindow $needles) { return $true }
-  return Test-UiaBrowserTab $needles
+  return Test-ServerConnection
 }
 
 # ---------- Environment check ----------
@@ -319,11 +331,10 @@ try {
   }
 
   # ---------- Watchdog: reopen the page whenever it is closed ----------
-  # Test-DshPageOpen reports $false only when no browser holds a connection to
-  # the server AND no dsh tab/window title matches. A minimized window or a
-  # background tab still keeps the connection alive, so it never pops a
-  # duplicate. We also require two consecutive "closed" reads (~4s) to ride out
-  # a brief WebSocket reconnect instead of opening a second page.
+  # Test-DshPageOpen reports $false only when it is confident the page is gone:
+  # no matching tab title (UIA or window title) and no live connection, or a
+  # WebSocket tearing down (CLOSE_WAIT) after the tab navigated away. Two
+  # consecutive "closed" reads (~4s) ride out a brief WebSocket reconnect.
   $closedStreak = 0
   while (-not $proc.HasExited) {
     Start-Sleep -Seconds $WatchInterval

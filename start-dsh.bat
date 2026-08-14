@@ -7,9 +7,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Content -LiteralPat
 #  runs everything below with PowerShell. Keep them unchanged.
 #  Behavior:
 #    - Starts "dsh web" and opens http://127.0.0.1:3080
-#    - Reopens the page within ~2s if the user closes it
-#    - Detects the dsh tab even when it sits in the background
-#      (Chrome/Edge etc.), so switching tabs never opens a duplicate
+#    - Reopens the page within ~4s if the user closes it
+#    - Detects the page by its live connection to the server, so a
+#      background tab or a minimized window never opens a duplicate
 #    - Stop with Ctrl+C or by closing this console window
 # ============================================================
 $ErrorActionPreference = "Continue"
@@ -58,6 +58,13 @@ public static class WinEnum {
     }, IntPtr.Zero);
     return found;
   }
+
+  // A minimized window still has WS_VISIBLE, so the enumeration above sees it,
+  // but Chromium defers rendering its UI tree while minimized, so UI Automation
+  // cannot reliably list its tabs. Expose IsIconic so the watchdog can treat a
+  // minimized browser window as "cannot tell" instead of "page closed".
+  [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr h);
+  public static bool IsMinimized(IntPtr h) { return IsIconic(h); }
 
   [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   public static System.Collections.Generic.List<IntPtr> GetWindowsByProcess(string[] processNames) {
@@ -131,7 +138,14 @@ function Test-UiaBrowserTab([string[]]$needles) {
     return $false
   }
   $inspected = $false
+  $minimized = $false
   foreach ($h in $hwnds) {
+    # A minimized Chromium window defers its UI tree, so FindAll can return
+    # zero TabItems even though the dsh tab is still open in the background.
+    # Skip minimized windows and remember they were seen; if we never find the
+    # tab elsewhere, report "cannot tell" ($null) so the watchdog does not pop
+    # an extra window while the browser sits in the taskbar.
+    if ([WinEnum]::IsMinimized($h)) { $minimized = $true; continue }
     try {
       $root = [System.Windows.Automation.AutomationElement]::FromHandle($h)
       if (-not $root) { continue }
@@ -152,7 +166,48 @@ function Test-UiaBrowserTab([string[]]$needles) {
       # Window vanished or its UIA tree is unavailable: treat as unknown.
     }
   }
-  if ($inspected) { return $false } else { return $null }
+  if (-not $inspected -or $minimized) { return $null } else { return $false }
+}
+
+# ---------- Primary detection: live TCP connection to the dsh server ----------
+# A loaded dsh page keeps a WebSocket (plus HTTP keep-alive) connection open to
+# the local server, and closing the tab tears those connections down within
+# ~2 seconds. Unlike window titles or UI Automation this signal does not care
+# whether the browser window is minimized or the tab sits in the background, so
+# it is the most reliable "is the page open" check on Windows.
+# Return values: $true = a browser holds a connection (page open),
+#                $false = no browser connection (page closed),
+#                $null = probe unavailable, cannot tell.
+function Test-ServerConnection {
+  $uri = $null
+  try { $uri = [Uri]$URL } catch { return $null }
+  if (-not $uri -or -not $uri.Port) { return $null }
+  $port = $uri.Port
+  $browsers = @("msedge", "chrome", "brave", "opera", "vivaldi", "firefox")
+
+  # netstat works for normal (non-elevated) users and needs no extra module,
+  # unlike Get-NetTCPConnection which can silently return nothing in some
+  # restricted environments.
+  $netstat = $null
+  try { $netstat = @(netstat -ano 2>$null) } catch { return $null }
+  if (-not $netstat -or $netstat.Count -eq 0) { return $null }
+
+  $owners = @{}
+  foreach ($line in $netstat) {
+    # Client side of a connection to the page: TCP <local> <remote>:<port> ESTABLISHED <pid>
+    if ($line -match ('^\s*TCP\s+\S+:(\d+)\s+\S+:' + $port + '\s+ESTABLISHED\s+(\d+)')) {
+      $owners[[int]$Matches[2]] = $true
+    }
+  }
+  if ($owners.Count -eq 0) { return $false }   # no live connection to the page
+
+  foreach ($ownerId in $owners.Keys) {
+    try {
+      $p = Get-Process -Id $ownerId -ErrorAction Stop
+      if ($browsers -contains $p.ProcessName) { return $true }
+    } catch {}
+  }
+  return $false   # connections exist, but none from a recognized browser
 }
 
 function Test-DshPageOpen {
@@ -160,6 +215,12 @@ function Test-DshPageOpen {
   #   $true  -> a dsh window/tab exists, do nothing
   #   $false -> confirmed gone, safe to (re)open
   #   $null  -> could not tell, be conservative and do NOT reopen
+  #
+  # Primary: a live browser connection to the server (independent of window
+  # minimization / background tabs). Fall back to the window/tab checks only
+  # when the connection probe itself is unavailable ($null).
+  $conn = Test-ServerConnection
+  if ($conn -ne $null) { return $conn }
   if (Test-PageWindow $needles) { return $true }
   return Test-UiaBrowserTab $needles
 }
@@ -240,26 +301,40 @@ try {
     Write-Host "The dsh page is already open in your browser."
   } else {
     # $false = confirmed closed, $null = could not tell on first launch.
-    # Open once here, but the watchdog below only reopens on a confirmed
-    # "closed" state, so a background tab never triggers a duplicate window.
-    Write-Host "Opening the web page..."
-    Start-Process $URL
-    $lastOpen = Get-Date
+    # If confirmed closed, wait one more interval: a background tab that is
+    # still reconnecting (e.g. right after the server restarted) re-attaches
+    # within a second or two, so a second check avoids opening a duplicate.
+    if ($pageState -eq $false) {
+      Start-Sleep -Seconds $WatchInterval
+      if ((Test-DshPageOpen) -eq $true) {
+        Write-Host "The dsh page is already open in your browser."
+        $pageState = $true
+      }
+    }
+    if ($pageState -ne $true) {
+      Write-Host "Opening the web page..."
+      Start-Process $URL
+      $lastOpen = Get-Date
+    }
   }
 
   # ---------- Watchdog: reopen the page whenever it is closed ----------
-  # Only reopen when we are sure the page is gone (window title no longer
-  # matches AND the browser session files show no dsh tab). When the page
-  # merely sits in a background tab, Test-DshPageOpen returns $true and we
-  # leave it alone.
+  # Test-DshPageOpen reports $false only when no browser holds a connection to
+  # the server AND no dsh tab/window title matches. A minimized window or a
+  # background tab still keeps the connection alive, so it never pops a
+  # duplicate. We also require two consecutive "closed" reads (~4s) to ride out
+  # a brief WebSocket reconnect instead of opening a second page.
+  $closedStreak = 0
   while (-not $proc.HasExited) {
     Start-Sleep -Seconds $WatchInterval
     if (-not $proc.HasExited) {
       $pageState = Test-DshPageOpen
-      if ($pageState -eq $false -and ((Get-Date) - $lastOpen).TotalSeconds -ge 5) {
+      if ($pageState -eq $false) { $closedStreak++ } else { $closedStreak = 0 }
+      if ($closedStreak -ge 2 -and ((Get-Date) - $lastOpen).TotalSeconds -ge 5) {
         Write-Host "[$(Get-Date -Format HH:mm:ss)] Page was closed, reopening..."
         Start-Process $URL
         $lastOpen = Get-Date
+        $closedStreak = 0
       }
     }
   }

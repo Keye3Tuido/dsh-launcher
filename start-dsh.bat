@@ -169,15 +169,17 @@ function Test-UiaBrowserTab([string[]]$needles) {
   if (-not $inspected -or $minimized) { return $null } else { return $false }
 }
 
-# ---------- Primary detection: live TCP connection to the dsh server ----------
-# A loaded dsh page keeps a WebSocket open to the local server. This signal is
-# independent of window minimization and background tabs. Crucially, when a tab
-# navigates away (a bookmark replaces the page) the WebSocket tears down and its
-# socket enters CLOSE_WAIT/FIN_WAIT, even though the browser may keep idle
-# keep-alive sockets ESTABLISHED for a while; spotting those closing sockets is
-# what tells "open" apart from "navigated away".
+# ---------- Fallback detection: live TCP connection to the dsh server ----------
+# A loaded dsh page keeps a WebSocket (plus HTTP keep-alive) connection open to
+# the local server. This signal is independent of window minimization and
+# background tabs, so it backs up UI Automation when the window cannot be read.
+# It only counts ESTABLISHED sockets: a CLOSE_WAIT/FIN_WAIT socket is NOT
+# treated as "closed", because that also appears when the browser merely freezes
+# a background tab (Edge sleeping tabs) or on a brief reconnect — reopening the
+# page then would be a false positive. Navigation away is instead caught by the
+# UIA title check, which runs first.
 # Return values: $true = a browser holds a live connection (page open),
-#                $false = no live connection, or a socket is closing (closed),
+#                $false = no browser connection (page closed),
 #                $null = probe unavailable, cannot tell.
 function Test-ServerConnection {
   $uri = $null
@@ -194,30 +196,21 @@ function Test-ServerConnection {
   if (-not $netstat -or $netstat.Count -eq 0) { return $null }
 
   $estOwners = @{}
-  $closing = 0
   foreach ($line in $netstat) {
-    # Client side of a connection to the page: TCP <local> <remote>:<port> <state> <pid>
-    if ($line -match ('^\s*TCP\s+\S+:\d+\s+\S+:' + $port + '\s+(\S+)\s+(\d+)')) {
-      $state = $Matches[1]
-      $owner = [int]$Matches[2]
-      if ($state -eq 'ESTABLISHED') { $estOwners[$owner] = $true }
-      elseif ($state -match '^(CLOSE_WAIT|FIN_WAIT_1|FIN_WAIT_2|LAST_ACK)$') { $closing++ }
+    # Client side of a live connection to the page: TCP <local> <remote>:<port> ESTABLISHED <pid>
+    if ($line -match ('^\s*TCP\s+\S+:\d+\s+\S+:' + $port + '\s+ESTABLISHED\s+(\d+)')) {
+      $estOwners[[int]$Matches[1]] = $true
     }
   }
+  if ($estOwners.Count -eq 0) { return $false }   # no live connection to the page
 
-  # A socket in CLOSE_WAIT/FIN_WAIT means the page just navigated away or was
-  # closed (its WebSocket is tearing down). Report closed even if some idle
-  # keep-alive sockets are still ESTABLISHED.
-  if ($closing -gt 0) { return $false }
-
-  # Only live ESTABLISHED connections remain: open if any belongs to a browser.
   foreach ($owner in $estOwners.Keys) {
     try {
       $p = Get-Process -Id $owner -ErrorAction Stop
       if ($browsers -contains $p.ProcessName) { return $true }
     } catch {}
   }
-  return $false   # connections exist but none from a recognized browser, or none at all
+  return $false   # connections exist, but none from a recognized browser
 }
 
 function Test-DshPageOpen {

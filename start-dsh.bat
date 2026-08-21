@@ -1,10 +1,12 @@
 @echo off
 setlocal
-powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Content -LiteralPath '%~f0' | Select-Object -Skip 3) -join [Environment]::NewLine | Set-Content -LiteralPath $env:TEMP\dshenv-launcher.ps1 -Encoding UTF8; & $env:TEMP\dshenv-launcher.ps1; Remove-Item $env:TEMP\dshenv-launcher.ps1 -ErrorAction SilentlyContinue" & exit /b
+set "DSH_LAUNCHER_DIR=%~dp0" & set "DSH_LAUNCHER_BAT=%~f0" & powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Content -LiteralPath '%~f0' | Select-Object -Skip 3) -join [Environment]::NewLine | Set-Content -LiteralPath $env:TEMP\dshenv-launcher-$PID.ps1 -Encoding UTF8; & $env:TEMP\dshenv-launcher-$PID.ps1; Remove-Item $env:TEMP\dshenv-launcher-$PID.ps1 -ErrorAction SilentlyContinue" & exit /b
 # ============================================================
 #  DeepSeek Harness (dsh web) one-click launcher - Windows
 #  Single file: the first 3 lines are the batch launcher that
-#  runs everything below with PowerShell. Keep them unchanged.
+#  runs everything below with PowerShell. Line 3 also passes the
+#  launcher path to PowerShell and uses a per-invocation temp name
+#  so the script can restart itself after a self-update.
 #  Behavior:
 #    - Starts "dsh web" and opens http://127.0.0.1:3080
 #    - Reopens the page within ~4s if the user closes it
@@ -18,6 +20,70 @@ $URL             = if ($env:DSH_URL) { $env:DSH_URL } else { "http://127.0.0.1:3
 $WatchInterval   = 2
 # First run downloads hundreds of MB of dependencies; allow up to 15 minutes.
 $ReadyTimeoutSec = 900
+
+# ---------- Self-update check (pull the latest launcher from GitHub) ----------
+# Repository: https://github.com/Keye3Tuido/dsh-launcher
+# Runs before launch; skips entirely when already up to date, when git or the
+# remote is missing, or when the network is unreachable.
+$LauncherDir = if ($env:DSH_LAUNCHER_DIR) { $env:DSH_LAUNCHER_DIR.TrimEnd('\') } else { (Split-Path -Parent $PSCommandPath) }
+$LauncherBat = if ($env:DSH_LAUNCHER_BAT) { $env:DSH_LAUNCHER_BAT } else { $null }
+
+function Test-SelfUpdate {
+  if ($env:DSH_UPDATE_DONE -eq "1") { return }   # just restarted after an update
+  $git = Get-Command git -ErrorAction SilentlyContinue
+  if (-not $git) { Write-Host "  (git not found; skipping launcher self-update)"; return }
+  if (-not (Test-Path (Join-Path $LauncherDir ".git"))) { Write-Host "  (not a git repository; skipping launcher self-update)"; return }
+
+  Push-Location $LauncherDir
+  try {
+    $origin = (& git remote get-url origin 2>$null)
+    if (-not $origin) { Write-Host "  (no git remote 'origin'; skipping launcher self-update)"; return }
+
+    Write-Host "Checking for launcher updates..."
+    $env:GIT_TERMINAL_PROMPT      = "0"
+    $env:GIT_HTTP_LOW_SPEED_LIMIT = "1000"
+    $env:GIT_HTTP_LOW_SPEED_TIME  = "30"
+    & git fetch --quiet origin 2>$null
+    if ($LASTEXITCODE -ne 0) { Write-Host "  (cannot reach the repository; skipping update)"; return }
+
+    $branch     = (& git rev-parse --abbrev-ref HEAD 2>$null)
+    if (-not $branch) { $branch = "master" }
+    $localHead  = (& git rev-parse HEAD 2>$null)
+    $remoteHead = (& git rev-parse ("origin/" + $branch) 2>$null)
+    if (-not $localHead -or -not $remoteHead) { Write-Host "  (cannot determine versions; skipping update)"; return }
+
+    if ($localHead -eq $remoteHead) {
+      Write-Host "[OK] Launcher is already up to date ($($localHead.Substring(0,7))), no update needed."
+      return
+    }
+
+    Write-Host "Update found: local $($localHead.Substring(0,7)) -> remote $($remoteHead.Substring(0,7))"
+    Write-Host "Updating..."
+    & git pull --ff-only --quiet origin $branch 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "[X] Auto-update failed (uncommitted local changes may block it)."
+      Write-Host "    Launching with the current version. Manual fix:"
+      Write-Host "      git -C `"$LauncherDir`" pull --ff-only"
+      return
+    }
+
+    Write-Host "[OK] Updated. Restarting the launcher with the new version..."
+    $env:DSH_UPDATE_DONE = "1"
+    if ($LauncherBat) {
+      try {
+        & cmd /c "`"$LauncherBat`""
+        exit 0
+      } catch {
+        Write-Host "  (restart failed; the update applies from the next launch)"
+      }
+    } else {
+      Write-Host "  (launcher path unknown; the update applies from the next launch)"
+    }
+  } finally {
+    Pop-Location
+  }
+}
+Test-SelfUpdate
 
 # ---------- Enumerate visible window titles (skip console windows) ----------
 # A tiny C# helper is the most reliable way. On some machines a broken

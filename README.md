@@ -25,7 +25,9 @@ chmod +x start-dsh.command && ./start-dsh.command
 - 自动打开 `http://127.0.0.1:3080`，网页被关闭约 4 秒后自动重开；
 - Windows 版通过检测浏览器到本地服务的连接判断页面是否打开，网页在后台标签页或窗口最小化时都不会误开重复页面（支持 Chrome/Edge/Firefox 等）；
 - 停止：终端中按 `Ctrl+C`，或直接关闭终端窗口；
-- 依赖 Node.js（<https://nodejs.org/>），未安装时脚本会提示。
+- 依赖 Node.js（<https://nodejs.org/>），未安装时脚本会提示；
+- 启动前自动检查启动器自身更新（从 <https://github.com/Keye3Tuido/dsh-launcher> 拉取）：已是最新版本直接启动，有新版本时自动更新并自动重启；
+- 自更新依赖 git（macOS 需安装 Xcode 命令行工具，Windows 需安装 Git for Windows）；未安装 git 或网络不可用时自动跳过自更新，不影响正常启动。
 
 ## 常见问题
 

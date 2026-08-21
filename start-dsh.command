@@ -10,9 +10,43 @@
 # ============================================================
 set -u
 cd "$(dirname "$0")"
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 URL="${DSH_URL:-http://127.0.0.1:3080}"
 WATCH_INTERVAL=2
+
+# ---------- 启动前自更新检查（自动从 GitHub 拉取最新版；已是最新则跳过） ----------
+# 远程仓库：https://github.com/Keye3Tuido/dsh-launcher
+if [ "${DSH_UPDATE_DONE:-0}" != "1" ]; then
+  if command -v git >/dev/null 2>&1 && [ -d .git ] && git remote get-url origin >/dev/null 2>&1; then
+    echo "正在检查启动器更新..."
+    # 网络不可用/过慢时自动放弃，绝不阻塞启动
+    if GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=30 \
+       git fetch --quiet origin 2>/dev/null; then
+      BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo master)
+      LOCAL_HEAD=$(git rev-parse HEAD 2>/dev/null)
+      REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null)
+      if [ -z "$REMOTE_HEAD" ] || [ "$LOCAL_HEAD" = "$REMOTE_HEAD" ]; then
+        echo "✔ 启动器已是最新版本（$(echo "$LOCAL_HEAD" | cut -c1-7)），无需更新。"
+      else
+        echo "发现新版本：本地 $(echo "$LOCAL_HEAD" | cut -c1-7) → 远程 $(echo "$REMOTE_HEAD" | cut -c1-7)"
+        echo "正在自动更新..."
+        if git pull --ff-only --quiet origin "$BRANCH" 2>/dev/null; then
+          echo "✔ 更新完成，正在用最新版本重新启动本启动器..."
+          export DSH_UPDATE_DONE=1
+          exec "$SELF" "$@"
+        else
+          echo "✗ 自动更新失败（可能因本地有未提交的改动）。本次仍用当前版本启动。"
+          echo "  可稍后手动执行：git -C \"$PWD\" pull --ff-only"
+        fi
+      fi
+    else
+      echo "  （无法连接远程仓库，跳过更新，继续启动）"
+    fi
+  else
+    echo "  （未检测到 git 或未配置远程仓库，跳过启动器自更新）"
+  fi
+fi
 
 # ---------- 环境检查 ----------
 if ! command -v node >/dev/null 2>&1; then

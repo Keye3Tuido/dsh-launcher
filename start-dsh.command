@@ -3,6 +3,7 @@
 #  DeepSeek Harness (dsh web) 一键启动 — macOS
 #  用法：双击本文件（start-dsh.command）即可
 #  行为：
+#    - 启动前自动检查并更新：启动器自身 + dsh 本体（默认跟踪 npm next 标签）
 #    - 启动 dsh web 并自动打开本地网页 http://127.0.0.1:3080
 #    - 网页被手动关闭后，约 2 秒内自动重新打开
 #    - 按 Ctrl+C 或直接关闭本终端窗口，即可停止程序
@@ -130,7 +131,30 @@ export npm_config_fetch_timeout=120000
 export npm_config_fetch_retries=3
 export npm_config_fetch_retry_maxtimeout=60000
 
-npx --yes @deepseek-ai/dsh web &
+# ---------- dsh 版本检查与自动更新（跟踪 npm 标签；可用 DSH_VERSION 切换） ----------
+# 默认跟踪 next（最新发布版，含 rc 预发布）；如需稳定版：DSH_VERSION=latest ./start-dsh.command
+DSH_TAG="${DSH_VERSION:-next}"
+VERSION_FILE="$PWD/.dsh-version"
+echo "正在检查 dsh 版本更新（跟踪标签：${DSH_TAG}）..."
+LATEST_DSH=$(npm view "@deepseek-ai/dsh@${DSH_TAG}" version 2>/dev/null | tail -1)
+if [ -z "$LATEST_DSH" ]; then
+  echo "  （无法获取 dsh 最新版本信息，跳过 dsh 版本检查）"
+else
+  INSTALLED_DSH=$(cat "$VERSION_FILE" 2>/dev/null || true)
+  if [ -n "$INSTALLED_DSH" ] && [ "$INSTALLED_DSH" = "$LATEST_DSH" ]; then
+    echo "✔ dsh 已是最新版本（${INSTALLED_DSH}），无需更新。"
+  else
+    echo "发现 dsh 新版本：${INSTALLED_DSH:-（首次安装）} → ${LATEST_DSH}，正在更新（首次下载可能需要几分钟）..."
+    if npx --yes "@deepseek-ai/dsh@${DSH_TAG}" --version >/dev/null 2>&1; then
+      echo "$LATEST_DSH" > "$VERSION_FILE"
+      echo "✔ dsh 已更新到 ${LATEST_DSH}。"
+    else
+      echo "✗ dsh 更新下载失败，将尝试用已有版本启动。"
+    fi
+  fi
+fi
+
+npx --yes "@deepseek-ai/dsh@${DSH_TAG}" web &
 DSH_PID=$!
 
 CLEANED=0

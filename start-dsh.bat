@@ -8,6 +8,8 @@ set "DSH_LAUNCHER_DIR=%~dp0" & set "DSH_LAUNCHER_BAT=%~f0" & powershell -NoProfi
 #  launcher path to PowerShell and uses a per-invocation temp name
 #  so the script can restart itself after a self-update.
 #  Behavior:
+#    - Auto-updates before launch: the launcher itself and the dsh npm
+#      package (tracks the "next" dist-tag by default; DSH_VERSION overrides)
 #    - Starts "dsh web" and opens http://127.0.0.1:3080
 #    - Reopens the page within ~4s if the user closes it
 #    - Detects the page by its live connection to the server, so a
@@ -315,7 +317,31 @@ $env:npm_config_fetch_timeout         = "120000"
 $env:npm_config_fetch_retries         = "3"
 $env:npm_config_fetch_retry_maxtimeout = "60000"
 
-$proc = Start-Process -FilePath "npx.cmd" -ArgumentList @("--yes", "@deepseek-ai/dsh", "web") -PassThru -NoNewWindow
+# ---------- dsh version check & auto-update (tracks an npm dist-tag) ----------
+# Defaults to "next" (newest published, incl. rc); set DSH_VERSION=latest for stable.
+$DshTag       = if ($env:DSH_VERSION) { $env:DSH_VERSION } else { "next" }
+$VersionFile  = Join-Path $LauncherDir ".dsh-version"
+Write-Host "Checking for dsh updates (tracking tag: $DshTag)..."
+$latestDsh = (& npm view "@deepseek-ai/dsh@$DshTag" version 2>$null | Select-Object -Last 1)
+if (-not $latestDsh) {
+  Write-Host "  (cannot fetch the latest dsh version; skipping check)"
+} else {
+  $installedDsh = if (Test-Path $VersionFile) { (Get-Content -LiteralPath $VersionFile -Raw).Trim() } else { "" }
+  if ($installedDsh -and $installedDsh -eq $latestDsh) {
+    Write-Host "[OK] dsh is already up to date ($installedDsh)."
+  } else {
+    Write-Host "dsh update found: $(if ($installedDsh) { $installedDsh } else { '(first install)' }) -> $latestDsh, downloading..."
+    & npx.cmd --yes "@deepseek-ai/dsh@$DshTag" --version 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      Set-Content -LiteralPath $VersionFile -Value $latestDsh -Encoding ASCII
+      Write-Host "[OK] dsh is now $latestDsh."
+    } else {
+      Write-Host "[X] dsh download failed; launching with the existing version."
+    }
+  }
+}
+
+$proc = Start-Process -FilePath "npx.cmd" -ArgumentList @("--yes", "@deepseek-ai/dsh@$DshTag", "web") -PassThru -NoNewWindow
 
 try {
   # ---------- Wait until the server is ready ----------

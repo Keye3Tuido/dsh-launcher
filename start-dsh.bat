@@ -322,23 +322,28 @@ $env:npm_config_fetch_retry_maxtimeout = "60000"
 $DshTag       = if ($env:DSH_VERSION) { $env:DSH_VERSION } else { "next" }
 $VersionFile  = Join-Path $LauncherDir ".dsh-version"
 Write-Host "Checking for dsh updates (tracking tag: $DshTag)..."
-$latestDsh = (& npm view "@deepseek-ai/dsh@$DshTag" version 2>$null | Select-Object -Last 1)
-if (-not $latestDsh) {
-  Write-Host "  (cannot fetch the latest dsh version; skipping check)"
-} else {
-  $installedDsh = if (Test-Path $VersionFile) { (Get-Content -LiteralPath $VersionFile -Raw).Trim() } else { "" }
-  if ($installedDsh -and $installedDsh -eq $latestDsh) {
-    Write-Host "[OK] dsh is already up to date ($installedDsh)."
+try {
+  $latestDsh = (& npm view "@deepseek-ai/dsh@$DshTag" version 2>$null | Select-Object -Last 1)
+  if (-not $latestDsh) {
+    Write-Host "  (cannot fetch the latest dsh version; skipping check)"
   } else {
-    Write-Host "dsh update found: $(if ($installedDsh) { $installedDsh } else { '(first install)' }) -> $latestDsh, downloading..."
-    & npx.cmd --yes "@deepseek-ai/dsh@$DshTag" --version 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-      Set-Content -LiteralPath $VersionFile -Value $latestDsh -Encoding ASCII
-      Write-Host "[OK] dsh is now $latestDsh."
+    $installedDsh = if (Test-Path $VersionFile) { (Get-Content -LiteralPath $VersionFile -Raw).Trim() } else { "" }
+    if ($installedDsh -and $installedDsh -eq $latestDsh) {
+      Write-Host "[OK] dsh is already up to date ($installedDsh)."
     } else {
-      Write-Host "[X] dsh download failed; launching with the existing version."
+      Write-Host "dsh update found: $(if ($installedDsh) { $installedDsh } else { '(first install)' }) -> $latestDsh, downloading..."
+      & npx.cmd --yes "@deepseek-ai/dsh@$DshTag" --version 2>$null | Out-Null
+      if ($LASTEXITCODE -eq 0) {
+        Set-Content -LiteralPath $VersionFile -Value $latestDsh -Encoding ASCII
+        Write-Host "[OK] dsh is now $latestDsh."
+      } else {
+        Write-Host "[X] dsh download failed; launching with the existing version."
+      }
     }
   }
+} catch {
+  # npm/npx missing or unusable: degrade gracefully, never block the launch
+  Write-Host "  (npm/npx unavailable; skipping dsh version check)"
 }
 
 $proc = Start-Process -FilePath "npx.cmd" -ArgumentList @("--yes", "@deepseek-ai/dsh@$DshTag", "web") -PassThru -NoNewWindow

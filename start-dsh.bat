@@ -205,23 +205,24 @@ function Test-UiaBrowserTab([string[]]$needles) {
     if (Get-Process -Name "firefox" -ErrorAction SilentlyContinue) { return $null }
     return $false
   }
-  $inspected = $false
-  $minimized = $false
+  $allReadable = $true
   foreach ($h in $hwnds) {
-    # A minimized Chromium window defers its UI tree, so FindAll can return
-    # zero TabItems even though the dsh tab is still open in the background.
-    # Skip minimized windows and remember they were seen; if we never find the
-    # tab elsewhere, report "cannot tell" ($null) so the watchdog does not pop
-    # an extra window while the browser sits in the taskbar.
-    if ([WinEnum]::IsMinimized($h)) { $minimized = $true; continue }
+    # A minimized window or a hung (not responding) page makes UI Automation
+    # return an incomplete or empty tab list even though the dsh tab may still
+    # be open in the background. Treat any window we could not read fully as
+    # "cannot tell" ($null) rather than "confirmed absent", so the watchdog
+    # never pops a duplicate while the browser is minimized or a page is hung.
+    if ([WinEnum]::IsMinimized($h)) { $allReadable = $false; continue }
     try {
       $root = [System.Windows.Automation.AutomationElement]::FromHandle($h)
-      if (-not $root) { continue }
+      if (-not $root) { $allReadable = $false; continue }
       $cond = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::TabItem)
       $tabs = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
-      $inspected = $true
+      # A healthy Chromium window always exposes at least one TabItem; zero
+      # tabs means the tree could not be read (hung page), not "no tabs".
+      if ($tabs.Count -eq 0) { $allReadable = $false; continue }
       for ($i = 0; $i -lt $tabs.Count; $i++) {
         $name = $tabs.Item($i).Current.Name
         if (-not $name) { continue }
@@ -232,9 +233,10 @@ function Test-UiaBrowserTab([string[]]$needles) {
       }
     } catch {
       # Window vanished or its UIA tree is unavailable: treat as unknown.
+      $allReadable = $false
     }
   }
-  if (-not $inspected -or $minimized) { return $null } else { return $false }
+  if (-not $allReadable) { return $null } else { return $false }
 }
 
 # ---------- Fallback detection: live TCP connection to the dsh server ----------
